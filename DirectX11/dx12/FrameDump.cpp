@@ -398,6 +398,35 @@ static void write_batch(std::vector<TextureCopy> *batch, const wchar_t *director
 	batch->clear();
 }
 
+void Dx12FrameDumpAdvanceCaptureWindow()
+{
+	static std::wstring pending_path;
+	static unsigned idle_presents = 0;
+	if (G->analyse_frame && !active) {
+		if (pending_path != G->ANALYSIS_PATH) {
+			pending_path = G->ANALYSIS_PATH;
+			idle_presents = 0;
+		}
+		// F8 may be handled before a Present whose draw lists were already
+		// recorded. Allow four more boundaries, but never capture indefinitely.
+		if (++idle_presents <= 4)
+			return;
+
+		wchar_t path[MAX_PATH];
+		FILE *status = nullptr;
+		swprintf_s(path, MAX_PATH, L"%ls\\capture_status.txt", G->ANALYSIS_PATH);
+		wfopen_ensuring_access(&status, path, L"w");
+		if (status) {
+			fputs("No DX12 draw reached the recorder in five Presents. No DDS captured.\n", status);
+			fclose(status);
+		}
+		LogOverlay(LOG_NOTICE, "Frame analysis: no DX12 draw reached recorder\n");
+	}
+	pending_path.clear();
+	idle_presents = 0;
+	G->analyse_frame = false;
+}
+
 void Dx12FrameDumpFramePresented()
 {
 	std::vector<TextureCopy> batch;
