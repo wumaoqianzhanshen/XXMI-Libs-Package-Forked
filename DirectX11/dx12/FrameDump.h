@@ -40,4 +40,4 @@ public:
 	Dx12GeometrySubmissionLock& operator=(const Dx12GeometrySubmissionLock&) = delete;
 };
 bool Dx12FrameGeometryAccepting();
-void Dx12FrameGeometryExecuted(Dx12GraphicsCommandList *list, ID3D12CommandQueue *queue);
+void Dx12FrameGeometryExecuted(Dx12GraphicsCommandList *list, ID3D12CommandQueue *queue, UINT64 order);

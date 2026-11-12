@@ -529,10 +529,10 @@ bool Dx12FindBufferHash(ID3D12Resource *resource, UINT64 offset, Dx12BufferHash 
 }
 
 // For the bounded geometry capture, a known upload must cover the exact
-// bound view and have been submitted on the capture queue. A hash alone
+// bound view and provide its submitted writer and order. A hash alone
 // would also accept a copy that was only recorded or later overwritten.
 bool Dx12BufferGeometryVersion(ID3D12Resource *resource, UINT64 offset, UINT64 bytes,
-		ID3D12CommandQueue *queue, UINT64 *version, UINT32 *crc)
+		UINT64 *version, UINT32 *crc, ID3D12CommandQueue **writer, UINT64 *order)
 {
 	bool ok = false;
 	AcquireSRWLockShared(&lock);
@@ -540,9 +540,11 @@ bool Dx12BufferGeometryVersion(ID3D12Resource *resource, UINT64 offset, UINT64 b
 	if (i != ranges.end()) {
 		auto v = i->second.find(offset);
 		if (v != i->second.end() && v->second.valid && v->second.bytes == bytes &&
-				v->second.queue == queue && v->second.order && !v->second.unmapped) {
+				v->second.queue && v->second.order && !v->second.unmapped) {
 			*version = v->second.version;
 			*crc = v->second.data_hash;
+			*writer = v->second.queue;
+			*order = v->second.order;
 			ok = true;
 		}
 	}

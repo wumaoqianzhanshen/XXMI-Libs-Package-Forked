@@ -432,6 +432,7 @@ void Dx12FrameDumpAdvanceCaptureWindow()
 
 void Dx12FrameDumpFramePresented()
 {
+	retire_geometry_signals();
 	std::vector<TextureCopy> batch;
 	wchar_t directory[MAX_PATH];
 	TextureCopy copy;

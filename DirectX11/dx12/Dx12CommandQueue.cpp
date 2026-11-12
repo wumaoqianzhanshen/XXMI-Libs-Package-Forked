@@ -203,9 +203,13 @@ void STDMETHODCALLTYPE Dx12CommandQueue::ExecuteCommandLists(UINT NumCommandList
 		// on separate queues remain parallel. No bridge work inside this gate.
 		Dx12GeometrySubmissionLock capture_lock(true);
 		const bool geometry = Dx12FrameGeometryAccepting();
-		if (buffer_writes) {
+		const bool ordered = buffer_writes || geometry;
+		order = 0;
+		if (ordered) {
 			Dx12QueueLock(mOrig);
 			order = Dx12QueueExecutes(mOrig);
+		}
+		if (buffer_writes) {
 			for (i = 0; i < NumCommandLists; i++) {
 				if (lists[i] == ppCommandLists[i])
 					continue;
@@ -221,13 +225,13 @@ void STDMETHODCALLTYPE Dx12CommandQueue::ExecuteCommandLists(UINT NumCommandList
 			Profiling::Spike::Scope spike(Profiling::Spike::DX12_EXECUTE_DRIVER, L"lists", NumCommandLists);
 			mOrig->ExecuteCommandLists(NumCommandLists, lists);
 		}
-		if (buffer_writes)
+		if (ordered)
 			Dx12QueueUnlock(mOrig);
 
 		if (geometry)
 			for (i = 0; i < NumCommandLists; i++)
 				Dx12FrameGeometryExecuted(lists[i] == ppCommandLists[i] ? nullptr :
-					static_cast<Dx12GraphicsCommandList*>(ppCommandLists[i]), mOrig);
+					static_cast<Dx12GraphicsCommandList*>(ppCommandLists[i]), mOrig, order);
 	}
 
 	if (!pins.empty()) {

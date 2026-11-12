@@ -1,17 +1,23 @@
 #include <atomic>
 #include <map>
 #include <tuple>
+#include <wrl/client.h>
+#include "Dx12CommandQueue.h"
 
 namespace {
 const UINT64 GEO_RANGE_CAP = 32ull << 20, GEO_TOTAL_CAP = 128ull << 20;
 const size_t GEO_ROWS_CAP = 16384;
 struct GeometrySubmission {
-	ID3D12CommandQueue *queue = nullptr;
+	Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
+	UINT64 order = 0;
 	unsigned count = 0;
 };
 struct GeometryView {
 	ID3D12Resource *resource = nullptr;
-	UINT64 serial = 0, offset = 0, version = 0;
+	UINT64 serial = 0, offset = 0, version = 0, writer_order = 0;
+	ID3D12CommandQueue *writer = nullptr;
+	const char *record_status = nullptr;
+	const char *queue_proof = nullptr;
 	UINT bytes = 0, slot = 0, stride = 0, format = 0, crc = 0;
 	uint32_t hash = 0;
 	bool ib = false;
@@ -79,13 +85,14 @@ static void remember_geometry_view(GeometryDraw &draw, Dx12GraphicsCommandList *
 				info.cpu_accessible || info.desc.Flags != D3D12_RESOURCE_FLAG_NONE)
 			v.status = "unsupported_heap_or_flags";
 		else if (Dx12ListWroteBuffer(&list->mBufferWrites, resource, v.offset, bytes) ||
-				!Dx12BufferGeometryVersion(resource, v.offset, bytes, dx12_shim->queue, &v.version, &v.crc))
+				!Dx12BufferGeometryVersion(resource, v.offset, bytes, &v.version, &v.crc, &v.writer, &v.writer_order))
 			v.status = "unstable_upload";
 		else {
 			resource->AddRef();
 			v.resource = resource;
 		}
 	}
+	v.record_status = v.status;
 	draw.views.push_back(v);
 }
 
@@ -158,10 +165,103 @@ static void json_string(FILE *out, const std::string &value)
 
 static bool geometry_version_ok(const GeometryView &v)
 {
-	UINT64 version;
+	UINT64 version, writer_order;
 	UINT32 crc;
-	return Dx12BufferGeometryVersion(v.resource, v.offset, v.bytes, dx12_shim->queue, &version, &crc)
-		&& version == v.version && crc == v.crc;
+	ID3D12CommandQueue *writer;
+	return Dx12BufferGeometryVersion(v.resource, v.offset, v.bytes, &version, &crc, &writer, &writer_order)
+		&& version == v.version && crc == v.crc && writer == v.writer && writer_order == v.writer_order;
+}
+
+struct GeometrySignal {
+	Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
+	Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+};
+// At most eight outstanding signals. Timeouts retain the objects until the
+// fence advances (or the device is lost); no pending GPU event uses our stack.
+static std::vector<GeometrySignal> geometry_signals;
+static void retire_geometry_signals()
+{
+	for (size_t i = geometry_signals.size(); i; --i)
+		if (geometry_signals[i-1].fence->GetCompletedValue() >= 1)
+			geometry_signals.erase(geometry_signals.begin() + i - 1);
+}
+
+static bool same_geometry_device_node(ID3D12CommandQueue *queue)
+{
+	Microsoft::WRL::ComPtr<IUnknown> a, b;
+	if (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT ||
+			FAILED(queue->GetDevice(IID_PPV_ARGS(&a))) ||
+			FAILED(dx12_shim->device->QueryInterface(IID_PPV_ARGS(&b))) || a.Get() != b.Get())
+		return false;
+	UINT from = queue->GetDesc().NodeMask, to = dx12_shim->queue->GetDesc().NodeMask;
+	// The staging allocations use node 0 (mask 1), as before.
+	return (!from || from == 1) && (!to || to == 1);
+}
+
+// A CPU completion proof, not a Wait inserted into the game's queues. The
+// caller holds the exclusive submit gate: all witnessed Execute calls are
+// already issued, and wrapped writers cannot start a new Execute meanwhile.
+static const char *geometry_draw_fence(ID3D12CommandQueue *queue, ULONGLONG deadline)
+{
+	retire_geometry_signals();
+	if (geometry_signals.size() >= 8)
+		return "draw_queue_signal_limit";
+	if (GetTickCount64() >= deadline)
+		return "draw_queue_timeout";
+	GeometrySignal signal;
+	signal.queue = queue;
+	if (FAILED(dx12_shim->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&signal.fence))))
+		return "draw_queue_fence_create_failed";
+	Dx12QueueLock(queue);
+	HRESULT hr = queue->Signal(signal.fence.Get(), 1);
+	Dx12QueueUnlock(queue);
+	if (FAILED(hr))
+		return "draw_queue_signal_failed";
+	ID3D12Fence *f = signal.fence.Get();
+	geometry_signals.push_back(std::move(signal));
+	for (;;) {
+		const UINT64 value = f->GetCompletedValue();
+		if (value == UINT64_MAX)
+			return "draw_queue_device_removed";
+		if (value >= 1)
+			return nullptr;
+		if (GetTickCount64() >= deadline)
+			return "draw_queue_timeout";
+		Sleep(1);
+	}
+}
+
+static const char *geometry_queue_check(GeometryView &view, const GeometrySubmission &sub,
+		std::map<ID3D12CommandQueue*, const char*> &fallback, ULONGLONG deadline)
+{
+	ID3D12CommandQueue *draw = sub.queue.Get(), *reader = dx12_shim->queue;
+	if (!draw || !reader || !sub.order || FAILED(dx12_shim->device->GetDeviceRemovedReason()))
+		return "draw_queue_unproven";
+	if (draw == reader)
+		view.queue_proof = "same_queue";
+	else {
+		if (!same_geometry_device_node(draw))
+			return "draw_queue_device_or_node";
+		if (Dx12QueueAfter(reader, draw, sub.order))
+			view.queue_proof = "tracked_dependency";
+		else {
+			auto proof = fallback.find(draw);
+			if (proof == fallback.end())
+				proof = fallback.emplace(draw, geometry_draw_fence(draw, deadline)).first;
+			if (proof->second)
+				return proof->second;
+			view.queue_proof = "draw_fence";
+		}
+	}
+	if (view.writer == reader)
+		return nullptr;
+	// The draw completion/dependency also covers an earlier upload on the
+	// same queue. A third queue needs independent tracked fence evidence.
+	if (view.writer == draw && view.writer_order < sub.order)
+		return nullptr;
+	if (!view.writer || !Dx12QueueAfter(reader, view.writer, view.writer_order))
+		return "upload_queue_unordered";
+	return nullptr;
 }
 
 static void record_geometry_copy(GeometryCopy &copy)
@@ -225,11 +325,14 @@ static void finish_geometry()
 	if (out)
 		CreateDirectoryEnsuringAccess(directory);
 	std::vector<GeometryCopy> copies;
+	std::unordered_map<UINT64, GeometrySubmission> submissions;
 	{
 		// Hold the capture submit gate only while gathering and waiting for
 		// the GPU copies. No game copy writer can be handed to a queue here.
 		Dx12GeometrySubmissionLock lock(true, true);
 		UINT64 budget = 0;
+		const ULONGLONG queue_deadline = GetTickCount64() + 125;
+		std::map<ID3D12CommandQueue*, const char*> queue_fallback;
 		std::map<std::tuple<UINT64, UINT64, UINT, UINT64>, size_t> dedup;
 		for (auto &draw : geometry_draws) {
 			const auto &submitted = geometry_submissions.at(draw.recording);
@@ -238,8 +341,6 @@ static void finish_geometry()
 					v.status = "unsubmitted";
 				else if (submitted.count > 1)
 					v.status = "repeat_submission";
-				else if (submitted.queue != dx12_shim->queue)
-					v.status = "different_queue";
 				else if (geometry_unknown_lists)
 					v.status = "untracked_submission";
 				if (v.status || !out)
@@ -258,6 +359,8 @@ static void finish_geometry()
 					v.status = "unknown_or_unsafe_state";
 				else if (!geometry_version_ok(v))
 					v.status = "changed";
+				else
+					v.status = geometry_queue_check(v, submitted, queue_fallback, queue_deadline);
 				if (v.status)
 					continue;
 				const auto key = std::make_tuple(v.serial, v.offset, v.bytes, v.version);
@@ -294,7 +397,7 @@ static void finish_geometry()
 					c.status = "changed";
 			}
 		}
-		geometry_submissions.clear();
+		submissions.swap(geometry_submissions);
 		geometry_unknown_lists = false;
 		geometry_accepting.store(false, std::memory_order_release);
 	}
@@ -323,6 +426,7 @@ static void finish_geometry()
 	}
 	if (out) {
 		for (const auto &d : geometry_draws) {
+			const auto &sub = submissions.at(d.recording);
 			for (const auto &v : d.views) {
 				const GeometryCopy *c = v.copy == SIZE_MAX ? nullptr : &copies[v.copy];
 				const char *status = v.status ? v.status : c ? c->status : "not_copied";
@@ -332,6 +436,10 @@ static void finish_geometry()
 					"\"base_vertex\":%d,\"instances\":%u,\"first_instance\":%u,\"status\":\"%s\",",
 					d.draw, v.ib ? "ib" : "vb", v.slot, v.serial, v.offset, v.bytes, v.stride, v.format,
 					v.hash, d.topology, d.start, d.count, d.base_vertex, d.instances, d.first_instance, status ? status : "ok");
+				fprintf(out, "\"draw_queue\":\"%p\",\"copy_queue\":\"%p\",\"writer_queue\":\"%p\","
+					"\"draw_order\":%llu,\"writer_order\":%llu,\"queue_proof\":\"%s\",\"record_status\":\"%s\",",
+					sub.queue.Get(), dx12_shim->queue, v.writer, sub.order, v.writer_order,
+					v.queue_proof ? v.queue_proof : "none", v.record_status ? v.record_status : "eligible");
 				if (!status && c)
 					fprintf(out, "\"file\":\"geometry/%ls\",", c->name);
 				else
@@ -384,7 +492,7 @@ bool Dx12FrameGeometryAccepting()
 	return geometry_accepting.load(std::memory_order_acquire);
 }
 
-void Dx12FrameGeometryExecuted(Dx12GraphicsCommandList *list, ID3D12CommandQueue *queue)
+void Dx12FrameGeometryExecuted(Dx12GraphicsCommandList *list, ID3D12CommandQueue *queue, UINT64 order)
 {
 	if (!Dx12FrameGeometryAccepting() || (list && !list->mFrameGeometryId))
 		return;
@@ -396,8 +504,10 @@ void Dx12FrameGeometryExecuted(Dx12GraphicsCommandList *list, ID3D12CommandQueue
 	}
 	auto it = geometry_submissions.find(list->mFrameGeometryId);
 	if (it != geometry_submissions.end()) {
-		if (it->second.count == 0)
+		if (it->second.count == 0) {
 			it->second.queue = queue;
+			it->second.order = order;
+		}
 		if (it->second.count < 2)
 			it->second.count++;
 	}
