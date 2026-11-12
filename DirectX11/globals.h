@@ -268,6 +268,15 @@ static EnumName_t<const wchar_t *, DepthBufferFilter> DepthBufferFilterNames[] =
 
 struct ShaderOverride {
 	std::wstring first_ini_section;
+    // Local opt-in: inherit this PS on direct graphics draws, including mod
+    // submeshes, unless an explicit custom PS takes precedence. No commands run.
+    CustomShader *dx12_inherit_ps = nullptr;
+    CommandListVariable *dx12_inherit_ps_when = nullptr;
+    std::string dx12_inherit_ps_sha256;
+    bool dx12_inherit_ps_identity_checked = false;
+    bool dx12_inherit_ps_identity_valid = false;
+    bool dx12_inherit_ps_noted = false;
+
 	DepthBufferFilter depth_filter;
 	char model[20]; // More than long enough for even ps_4_0_level_9_0
 	int allow_duplicate_hashes;

@@ -1,6 +1,8 @@
 #include "DrawPath.h"
 
 #include <d3dcompiler.h>
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
 
 #include <algorithm>
 #include <deque>
@@ -4730,6 +4732,62 @@ unextended:
 // draw is never made with a mod's shaders. With extend, a pipeline with those
 // that the game's root signature has nothing for some registers of is made
 // with that extended for them, see scope->extension.
+// Select before signature fitting and resource mapping. Never submit a draw.
+static const Dx12ShaderInfo *local_inherited_ps(const ShimState *mod, bool mod_draw)
+{
+    const Dx12ShaderInfo *original = scope->pipeline->shaders[DX12_STAGE_PS];
+    if (scope->compute || scope->skin || !original || !G->fix_enabled || dx12_mods_disabled)
+        return nullptr;
+    if (mod_draw && (mod->stages[DX12_STAGE_PS].shader || mod->stages[DX12_STAGE_PS].shader_unbound))
+        return nullptr;
+    auto found = lookup_shaderoverride(original->hash);
+    if (found == G->mShaderOverrideMap.end()) return nullptr;
+    ShaderOverride &rule = found->second;
+    if (!rule.dx12_inherit_ps || !rule.dx12_inherit_ps_when || rule.dx12_inherit_ps_when->fval != 1.0f)
+        return nullptr;
+    auto fail = [&rule, original](const char *reason)->const Dx12ShaderInfo* {
+        if (!rule.dx12_inherit_ps_noted) {
+            Dx12LogInfo("Local inherited PS %016I64x not applied: %s\n", original->hash, reason);
+            rule.dx12_inherit_ps_noted = true;
+        }
+        return nullptr;
+    };
+    if (!rule.dx12_inherit_ps_identity_checked) {
+        rule.dx12_inherit_ps_identity_checked = true;
+        rule.dx12_inherit_ps_identity_valid = rule.dx12_inherit_ps_sha256.empty();
+        if (!rule.dx12_inherit_ps_sha256.empty() && original->bytecode) {
+            BCRYPT_ALG_HANDLE alg = nullptr;
+            BYTE digest[32];
+            if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0) {
+                NTSTATUS hr = BCryptHash(alg, nullptr, 0, const_cast<PUCHAR>(original->bytecode), original->size, digest, 32);
+                BCryptCloseAlgorithmProvider(alg, 0);
+                if (hr >= 0) {
+                    const char *hex = "0123456789abcdef"; std::string value;
+                    for (BYTE byte : digest) {value += hex[byte >> 4]; value += hex[byte & 15];}
+                    rule.dx12_inherit_ps_identity_valid = value == rule.dx12_inherit_ps_sha256;
+                }
+            }
+        }
+    }
+    if (!rule.dx12_inherit_ps_identity_valid) return fail("original bytecode SHA256 unavailable/mismatched; restart if loaded late");
+    CustomShader *custom = rule.dx12_inherit_ps;
+    custom->substantiate(static_cast<ID3D11Device*>(dx12_shim->shim_device));
+    const ShimShader *shader = ShimShaderOf(custom->ps);
+    if (!shader) return fail("replacement PS could not be created");
+    if (original->dxil) shader = shader->dxil_form;
+    if (!shader || shader->dxil != original->dxil) return fail("replacement shader model does not match pipeline");
+    shader_info_of_mod(shader, &scope->mod_shaders[DX12_STAGE_PS]);
+    const Dx12ShaderInfo *replacement = &scope->mod_shaders[DX12_STAGE_PS];
+    // Inherited effects must reuse the game's register/root contract. New
+    // registers need explicit CustomShader scopes and are not guessed here.
+    if (!original->reflected || !replacement->reflected || original->unbounded_srv || original->unmasked
+        || (replacement->srv[0] & ~original->srv[0]) || (replacement->srv[1] & ~original->srv[1])
+        || (replacement->cbv & ~original->cbv) || (replacement->uav & ~original->uav)
+        || replacement->targets != original->targets)
+        return fail("replacement register/output contract is not a subset of original");
+    return replacement;
+}
+
 static void apply_pipeline(const ShimState *mod, bool mod_draw, bool extend)
 {
 	ID3D12GraphicsCommandList *list = scope->list->mOrig;
@@ -4738,6 +4796,7 @@ static void apply_pipeline(const ShimState *mod, bool mod_draw, bool extend)
 	Dx12PipelineVariantDesc wanted = {};
 	const char *why = NULL;
 	UINT stages = 0;
+    bool inherited_ps = false;
 
 	if (scope->game_layout && mod->input_layout && mod->input_layout != scope->game_layout) {
 		const ShimInputLayout *layout = static_cast<const ShimInputLayout*>(mod->input_layout);
@@ -4766,6 +4825,14 @@ static void apply_pipeline(const ShimState *mod, bool mod_draw, bool extend)
 			stages |= 1u << stage;
 		}
 	}
+    if (!wanted.shaders[DX12_STAGE_PS] && !(wanted.removed_stages & (1u << DX12_STAGE_PS))) {
+        const Dx12ShaderInfo *inherited = local_inherited_ps(mod, mod_draw);
+        if (inherited) {
+            wanted.shaders[DX12_STAGE_PS] = inherited;
+            inherited_ps = true;
+            stages |= 1u << DX12_STAGE_PS;
+        }
+    }
 	// A pixel shader of a mod reads what the stage before it wrote in the
 	// D3D11 game, which the D3D12 game's may not all write
 	if (stages & 1u << DX12_STAGE_PS) {
@@ -4810,7 +4877,7 @@ static void apply_pipeline(const ShimState *mod, bool mod_draw, bool extend)
 		else
 			scope->shaders[stage] = variant && wanted.shaders[stage] ? wanted.shaders[stage] : scope->pipeline->shaders[stage];
 	}
-	scope->custom_stages = variant ? stages : 0;
+	scope->custom_stages = variant ? (stages & ~(inherited_ps ? (1u << DX12_STAGE_PS) : 0)) : 0;
 	if (stages && variant) {
 		stats.custom_draws++;
 		stats.custom_extended += scope->extension.signature != NULL;
@@ -5392,7 +5459,8 @@ static void work_out_filter(Dx12DrawFilter *filter, const UINT64 *hashes)
 		auto found = lookup_shaderoverride(hashes[graphics_stage]);
 		if (found == G->mShaderOverrideMap.end())
 			continue;
-		if (found->second.depth_filter != DepthBufferFilter::NONE
+		if (found->second.dx12_inherit_ps
+            || found->second.depth_filter != DepthBufferFilter::NONE
 		    || !CommandListOnlyChecksTextureOverrides(&found->second.command_list, &slots)
 		    || !CommandListOnlyChecksTextureOverrides(&found->second.post_command_list, &slots)) {
 			only_checks = false;

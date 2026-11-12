@@ -2629,6 +2629,7 @@ static void warn_deprecated_shaderoverride_options(const wchar_t *id, ShaderOver
 // function. Used by ParseCommandList to find any unrecognised lines.
 wchar_t *ShaderOverrideIniKeys[] = {
 	L"hash",
+    L"dx12_inherit_ps", L"dx12_inherit_ps_when", L"dx12_inherit_ps_original_sha256",
 	L"hash_dx12",
 	L"allow_duplicate_hash",
 	L"depth_filter",
@@ -2710,6 +2711,42 @@ static void ParseShaderOverrideSections()
 			wcstombs(override->model, setting, ARRAYSIZE(override->model));
 			override->model[ARRAYSIZE(override->model) - 1] = '\0';
 		}
+
+
+        // Metadata, not a late PS callback. Require an explicit global gate.
+        if (GetIniStringAndLog(id, L"dx12_inherit_ps", 0, setting, MAX_PATH)) {
+            wstring target(setting), ini_namespace, namespaced;
+            std::transform(target.begin(), target.end(), target.begin(), ::towlower);
+            get_section_namespace(id, &ini_namespace);
+            auto shader = customShaders.end();
+            if (get_namespaced_section_name_lower(&target, &ini_namespace, &namespaced))
+                shader = customShaders.find(namespaced);
+            if (shader == customShaders.end()) shader = customShaders.find(target);
+            CommandListVariable *gate = nullptr;
+            bool valid = GetIniStringAndLog(id, L"dx12_inherit_ps_when", 0, setting, MAX_PATH)
+                && parse_command_list_var_name(wstring(setting), &ini_namespace, &gate);
+            valid = valid && shader != customShaders.end() && shader->second.ps_override;
+            std::string digest;
+            if (GetIniStringAndLog(id, L"dx12_inherit_ps_original_sha256", 0, setting, MAX_PATH)) {
+                for (const wchar_t *p = setting; *p; ++p) {
+                    wchar_t c = towlower(*p);
+                    if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) valid = false;
+                    digest.push_back((char)c);
+                }
+                valid = valid && digest.size() == 64;
+            }
+            if (valid && !duplicate) {
+                override->dx12_inherit_ps = &shader->second;
+                override->dx12_inherit_ps_when = gate;
+                override->dx12_inherit_ps_sha256 = digest;
+                dx12_keep_shader_bytecode = true;
+                LogInfo("Local inherited PS configured; explicit custom PS wins, gate must equal 1\n");
+            } else {
+                override->dx12_inherit_ps = nullptr;
+                override->dx12_inherit_ps_when = nullptr;
+                IniWarningW(L"Invalid or duplicate local inherited PS declaration: [%ls]\n", id);
+            }
+        }
 
 		ParseCommandList(id, &override->command_list, &override->post_command_list, ShaderOverrideIniKeys);
 
