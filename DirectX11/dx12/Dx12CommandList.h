@@ -105,6 +105,7 @@ public:
 	std::vector<Dx12Transition> mTransitions;
 	// The same for what the copies it records write to buffers
 	Dx12ListBufferWrites mBufferWrites;
+	bool mGeometryWildcardAlias = false;
 
 	Dx12GraphicsCommandList(Dx12Device *device, ID3D12GraphicsCommandList *orig);
 

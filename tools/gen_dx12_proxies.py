@@ -43,6 +43,7 @@ CLASSES = {
         'CreateCommandQueue', 'CreateCommandQueue1',
         'CreateCommandList', 'CreateCommandList1',
         'CreateDescriptorHeap', 'CopyDescriptors', 'CopyDescriptorsSimple',
+        'CreateHeap', 'CreateHeap1',
         'MakeResident', 'Evict', 'EnqueueMakeResident', 'SetResidencyPriority',
         'CreateCommittedResource', 'CreateCommittedResource1', 'CreateCommittedResource2',
         'CreateCommittedResource3', 'CreatePlacedResource', 'CreatePlacedResource1',
@@ -54,7 +55,7 @@ CLASSES = {
         'CreatePipelineState', 'CreatePipelineLibrary',
     ]),
     'Dx12CommandQueue': ('ID3D12CommandQueue', [
-        'GetDevice', 'ExecuteCommandLists', 'Signal', 'Wait',
+        'GetDevice', 'ExecuteCommandLists', 'Signal', 'Wait', 'UpdateTileMappings',
     ]),
     'Dx12GraphicsCommandList': ('ID3D12GraphicsCommandList10', [
         'GetDevice', 'Close', 'Reset', 'ClearState',

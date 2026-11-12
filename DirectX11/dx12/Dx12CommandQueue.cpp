@@ -126,6 +126,15 @@ HRESULT STDMETHODCALLTYPE Dx12CommandQueue::GetDevice(REFIID riid, void **ppvDev
 	return mDevice->QueryInterface(riid, ppvDevice);
 }
 
+void STDMETHODCALLTYPE Dx12CommandQueue::UpdateTileMappings(ID3D12Resource *pResource, UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates, const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges, const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts, D3D12_TILE_MAPPING_FLAGS Flags)
+{
+	Dx12GeometrySubmissionLock capture_lock(true);
+	// The existing heap history cannot prove where reserved tiles overlap.
+	// CopyTileMappings only reuses mappings, whose source heap is already excluded.
+	Dx12GeometryExcludeHeap(pHeap);
+	mOrig->UpdateTileMappings(pResource, NumResourceRegions, pResourceRegionStartCoordinates, pResourceRegionSizes, pHeap, NumRanges, pRangeFlags, pHeapRangeStartOffsets, pRangeTileCounts, Flags);
+}
+
 void STDMETHODCALLTYPE Dx12CommandQueue::ExecuteCommandLists(UINT NumCommandLists, ID3D12CommandList *const *ppCommandLists)
 {
 	ID3D12CommandList *stack[64], **lists = stack;

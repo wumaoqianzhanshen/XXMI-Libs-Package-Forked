@@ -1,6 +1,7 @@
 #include "Dx12Device.h"
 
 #include <vector>
+#include <wrl/client.h>
 
 #include "util.h"
 
@@ -9,6 +10,7 @@
 #include "Dx12CommandList.h"
 #include "Dx12CommandQueue.h"
 #include "Dx12PipelineLibrary.h"
+#include "FrameDump.h"
 #include "PipelineRegistry.h"
 #include "ResourceTracker.h"
 #include "../profiling.h"
@@ -512,30 +514,49 @@ HRESULT STDMETHODCALLTYPE Dx12Device::CreateCommittedResource3(const D3D12_HEAP_
 	return hr;
 }
 
+HRESULT STDMETHODCALLTYPE Dx12Device::CreateHeap(const D3D12_HEAP_DESC *pDesc, REFIID riid, void **ppvHeap)
+{
+	HRESULT hr = mOrig->CreateHeap(pDesc, riid, ppvHeap);
+	if (SUCCEEDED(hr))
+		Dx12GeometryRegisterHeap(mOrig, ppvHeap);
+	return hr;
+}
+
+HRESULT STDMETHODCALLTYPE Dx12Device::CreateHeap1(const D3D12_HEAP_DESC *pDesc, ID3D12ProtectedResourceSession *pProtectedSession, REFIID riid, void **ppvHeap)
+{
+	HRESULT hr = mOrig->CreateHeap1(pDesc, pProtectedSession, riid, ppvHeap);
+	if (SUCCEEDED(hr) && !pProtectedSession)
+		Dx12GeometryRegisterHeap(mOrig, ppvHeap);
+	return hr;
+}
+
 HRESULT STDMETHODCALLTYPE Dx12Device::CreatePlacedResource(ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, REFIID riid, void **ppvResource)
 {
+	Dx12GeometrySubmissionLock capture_lock(true);
 	HRESULT hr = mOrig->CreatePlacedResource(pHeap, HeapOffset, pDesc, InitialState, pOptimizedClearValue, riid, ppvResource);
 
-	if (SUCCEEDED(hr))
-		Dx12TrackResource(riid, ppvResource, InitialState, false, { "CreatePlacedResource", UINT_MAX, false });
+	if (SUCCEEDED(hr) && ppvResource && *ppvResource)
+		Dx12TrackResource(riid, ppvResource, InitialState, false, { "CreatePlacedResource", UINT_MAX, false, Dx12GeometryRegisterPlacement(mOrig, pHeap, HeapOffset, pDesc) });
 	return hr;
 }
 
 HRESULT STDMETHODCALLTYPE Dx12Device::CreatePlacedResource1(ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *pOptimizedClearValue, REFIID riid, void **ppvResource)
 {
+	Dx12GeometrySubmissionLock capture_lock(true);
 	HRESULT hr = mOrig->CreatePlacedResource1(pHeap, HeapOffset, pDesc, InitialState, pOptimizedClearValue, riid, ppvResource);
 
-	if (SUCCEEDED(hr))
-		Dx12TrackResource(riid, ppvResource, InitialState, false, { "CreatePlacedResource1", UINT_MAX, false });
+	if (SUCCEEDED(hr) && ppvResource && *ppvResource)
+		Dx12TrackResource(riid, ppvResource, InitialState, false, { "CreatePlacedResource1", UINT_MAX, false, Dx12GeometryRegisterPlacement(mOrig, pHeap, HeapOffset, nullptr) });
 	return hr;
 }
 
 HRESULT STDMETHODCALLTYPE Dx12Device::CreatePlacedResource2(ID3D12Heap *pHeap, UINT64 HeapOffset, const D3D12_RESOURCE_DESC1 *pDesc, D3D12_BARRIER_LAYOUT InitialLayout, const D3D12_CLEAR_VALUE *pOptimizedClearValue, UINT32 NumCastableFormats, const DXGI_FORMAT *pCastableFormats, REFIID riid, void **ppvResource)
 {
+	Dx12GeometrySubmissionLock capture_lock(true);
 	HRESULT hr = mOrig->CreatePlacedResource2(pHeap, HeapOffset, pDesc, InitialLayout, pOptimizedClearValue, NumCastableFormats, pCastableFormats, riid, ppvResource);
 
-	if (SUCCEEDED(hr))
-		Dx12TrackResource(riid, ppvResource, DX12_STATE_UNKNOWN, false, { "CreatePlacedResource2", UINT_MAX, false });
+	if (SUCCEEDED(hr) && ppvResource && *ppvResource)
+		Dx12TrackResource(riid, ppvResource, DX12_STATE_UNKNOWN, false, { "CreatePlacedResource2", UINT_MAX, false, Dx12GeometryRegisterPlacement(mOrig, pHeap, HeapOffset, nullptr) });
 	return hr;
 }
 
@@ -702,6 +723,14 @@ HRESULT STDMETHODCALLTYPE Dx12Device::Evict(UINT NumObjects, ID3D12Pageable *con
 	}
 	if (passed.empty())
 		return S_OK;
+	Dx12GeometrySubmissionLock capture_lock(true);
+	// Leave residency behavior unchanged; an explicitly evicted heap is
+	// outside the conservative placed capture policy even after re-residency.
+	for (auto *object : passed) {
+		Microsoft::WRL::ComPtr<ID3D12Heap> heap;
+		if (object && SUCCEEDED(object->QueryInterface(IID_PPV_ARGS(&heap))))
+			Dx12GeometryExcludeHeap(heap.Get());
+	}
 	return mOrig->Evict((UINT)passed.size(), passed.data());
 }
 

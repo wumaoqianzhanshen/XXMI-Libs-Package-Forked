@@ -20,10 +20,24 @@ const LONG DX12_STATE_UNKNOWN = -1;
 
 // F8 diagnostics only: preserve the creation entry point and its inputs
 // separately from what GetHeapProperties reports about the resource.
+// Geometry-only identity. The heap pointer is an opaque canonical COM key,
+// never dereferenced from the capture path. Serials reject address reuse.
+struct Dx12GeometryPlacement {
+	IUnknown *heap = nullptr;
+	UINT64 heap_serial = 0, offset = 0, bytes = 0, allocation_serial = 0;
+	bool placed = false;
+};
+void Dx12GeometryRegisterHeap(ID3D12Device *device, void **output);
+Dx12GeometryPlacement Dx12GeometryRegisterPlacement(ID3D12Device *device, ID3D12Heap *heap,
+		UINT64 offset, const D3D12_RESOURCE_DESC *legacy_desc);
+void Dx12GeometryExcludeHeap(ID3D12Heap *heap);
+const char *Dx12GeometryPlacementStatus(const Dx12GeometryPlacement &placement);
+
 struct Dx12GeometryResourceOrigin {
 	const char *creation_api = nullptr;
 	UINT requested_heap_flags = UINT_MAX;
 	bool protected_session = false;
+	Dx12GeometryPlacement placement;
 };
 
 struct Dx12ResourceInfo {

@@ -23,11 +23,12 @@ struct GeometryResourceDiagnostic {
 	bool present = false;
 	bool committed_gate_passed = false;
 	bool cpu_visible = false;
+	const char *placed_status = nullptr;
 };
 struct GeometryView {
 	GeometryResourceDiagnostic diagnostic;
 	ID3D12Resource *resource = nullptr;
-	UINT64 serial = 0, offset = 0, version = 0, writer_order = 0;
+	UINT64 serial = 0, offset = 0, version = 0, writer_order = 0, va = 0;
 	ID3D12CommandQueue *writer = nullptr;
 	const char *record_status = nullptr;
 	const char *queue_proof = nullptr;
@@ -55,6 +56,7 @@ static SRWLOCK geometry_events = SRWLOCK_INIT;
 static std::atomic<bool> geometry_accepting(false);
 static UINT64 geometry_serial;
 static bool geometry_unknown_lists;
+static bool geometry_wildcard_alias;
 static std::unordered_map<UINT64, GeometrySubmission> geometry_submissions;
 static std::vector<GeometryDraw> geometry_draws;
 static size_t geometry_rows, geometry_omitted;
@@ -73,6 +75,7 @@ static void remember_geometry_view(GeometryDraw &draw, Dx12GraphicsCommandList *
 	v.stride = stride;
 	v.format = format;
 	v.bytes = bytes;
+	v.va = va;
 	v.hash = hash;
 	Dx12ResourceInfo info;
 	ID3D12Resource *resource = nullptr;
@@ -95,11 +98,16 @@ static void remember_geometry_view(GeometryDraw &draw, Dx12GraphicsCommandList *
 		v.diagnostic = { info.geometry_origin, info.geometry_heap_properties,
 			info.geometry_heap_flags, info.desc.Flags, info.geometry_heap_query, info.desc.Width,
 			info.state, true, info.geometry_safe_committed, info.cpu_accessible };
+		const bool placed = info.geometry_origin.placement.placed;
+		if (placed)
+			v.diagnostic.placed_status = Dx12GeometryPlacementStatus(info.geometry_origin.placement);
 		if (info.geometry_barrier_unproven)
 			v.status = "excluded_barrier";
-		else if (!info.geometry_safe_committed || info.heap_type != D3D12_HEAP_TYPE_DEFAULT ||
+		else if ((!placed && !info.geometry_safe_committed) || info.heap_type != D3D12_HEAP_TYPE_DEFAULT ||
 				info.cpu_accessible || info.desc.Flags != D3D12_RESOURCE_FLAG_NONE)
 			v.status = "unsupported_heap_or_flags";
+		else if (v.diagnostic.placed_status)
+			v.status = v.diagnostic.placed_status;
 		else if (Dx12ListWroteBuffer(&list->mBufferWrites, resource, v.offset, bytes) ||
 				!Dx12BufferGeometryVersion(resource, v.offset, bytes, &v.version, &v.crc, &v.writer, &v.writer_order))
 			v.status = "unstable_upload";
@@ -352,9 +360,15 @@ static void print_geometry_resource_diagnostic(FILE *out, const GeometryResource
 		fputs(",\"heap_type\":null,\"heap_flags\":null,\"cpu_page_property\":null,"
 			"\"memory_pool\":null,\"creation_node_mask\":null,\"visible_node_mask\":null", out);
 	fprintf(out, ",\"resource_flags\":%u,\"resource_width\":%llu,\"recorded_state\":%ld,"
-		"\"cpu_visible\":%s,\"committed_gate_passed\":%s,\"reasons\":[", (UINT)d.resource_flags,
+		"\"cpu_visible\":%s,\"committed_gate_passed\":%s", (UINT)d.resource_flags,
 		d.width, d.recorded_state, d.cpu_visible ? "true" : "false",
 		d.committed_gate_passed ? "true" : "false");
+	if (d.origin.placement.placed)
+		fprintf(out, ",\"placed_status\":\"%s\",\"placed_heap_serial\":%llu,"
+			"\"placed_heap_offset\":%llu,\"placed_allocation_bytes\":%llu",
+			d.placed_status ? d.placed_status : "eligible", d.origin.placement.heap_serial,
+			d.origin.placement.offset, d.origin.placement.bytes);
+	fputs(",\"reasons\":[", out);
 	const char *sep = "";
 	auto reason = [&](bool fail, const char *name) {
 		if (fail) {
@@ -362,7 +376,9 @@ static void print_geometry_resource_diagnostic(FILE *out, const GeometryResource
 			sep = ",";
 		}
 	};
-	reason(!d.committed_gate_passed, "committed_gate");
+	reason(!d.origin.placement.placed && !d.committed_gate_passed, "committed_gate");
+	if (d.placed_status)
+		reason(true, d.placed_status);
 	reason(FAILED(d.heap_query), "heap_properties_unknown");
 	reason(SUCCEEDED(d.heap_query) && d.heap.Type != D3D12_HEAP_TYPE_DEFAULT, "non_default_heap");
 	reason(d.cpu_visible, "cpu_visible");
@@ -405,16 +421,28 @@ static void finish_geometry()
 				if (v.status || !out)
 					continue;
 				Dx12ResourceInfo info;
+				const bool placed = v.diagnostic.origin.placement.placed;
+				ID3D12Resource *resolved = nullptr;
+				UINT64 resolved_offset = 0;
+				const char *placement_status = nullptr;
+				const LONG read_states = D3D12_RESOURCE_STATE_INDEX_BUFFER |
+					D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+					D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+					D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+					D3D12_RESOURCE_STATE_COPY_SOURCE |
+					(placed ? D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT : 0);
 				if (!Dx12GetResourceInfo(v.resource, &info) || info.serial != v.serial)
 					v.status = "resource_identity_changed";
 				else if (info.geometry_barrier_unproven)
 					v.status = "excluded_barrier";
-				else if (info.state == DX12_STATE_UNKNOWN ||
-						(info.state & ~(D3D12_RESOURCE_STATE_INDEX_BUFFER |
-							D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
-							D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-							D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-							D3D12_RESOURCE_STATE_COPY_SOURCE)))
+				else if (placed && geometry_wildcard_alias)
+					v.status = "placed_alias_unproven";
+				else if (placed && (placement_status = Dx12GeometryPlacementStatus(info.geometry_origin.placement)))
+					v.status = placement_status;
+				else if (placed && (!Dx12FindBuffer(v.va, &resolved, &resolved_offset) ||
+						resolved != v.resource || resolved_offset != v.offset))
+					v.status = "resource_identity_changed";
+				else if (info.state == DX12_STATE_UNKNOWN || (info.state & ~read_states))
 					v.status = "unknown_or_unsafe_state";
 				else if (!geometry_version_ok(v))
 					v.status = "changed";
@@ -458,6 +486,7 @@ static void finish_geometry()
 		}
 		submissions.swap(geometry_submissions);
 		geometry_unknown_lists = false;
+		geometry_wildcard_alias = false;
 		geometry_accepting.store(false, std::memory_order_release);
 	}
 	// No game submission is held for mapping or file IO. The readback is
@@ -554,7 +583,7 @@ bool Dx12FrameGeometryAccepting()
 
 void Dx12FrameGeometryExecuted(Dx12GraphicsCommandList *list, ID3D12CommandQueue *queue, UINT64 order)
 {
-	if (!Dx12FrameGeometryAccepting() || (list && !list->mFrameGeometryId))
+	if (!Dx12FrameGeometryAccepting() || (list && !list->mFrameGeometryId && !list->mGeometryWildcardAlias))
 		return;
 	AcquireSRWLockExclusive(&geometry_events);
 	if (!list) {
@@ -562,6 +591,7 @@ void Dx12FrameGeometryExecuted(Dx12GraphicsCommandList *list, ID3D12CommandQueue
 		ReleaseSRWLockExclusive(&geometry_events);
 		return;
 	}
+	geometry_wildcard_alias |= list->mGeometryWildcardAlias;
 	auto it = geometry_submissions.find(list->mFrameGeometryId);
 	if (it != geometry_submissions.end()) {
 		if (it->second.count == 0) {

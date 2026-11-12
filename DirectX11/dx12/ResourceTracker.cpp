@@ -1,8 +1,10 @@
 #include "ResourceTracker.h"
 
+#include <iterator>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <wrl/client.h>
 
 #include "BufferHash.h"
 
@@ -151,6 +153,141 @@ void Dx12FindBufferStampCounters(UINT64 va, const volatile LONG64 *counters[2])
 	counters[1] = va_stamp(va >> VA_STAMP_SHIFT);
 }
 
+// Only explicitly observed, private DEFAULT heaps are eligible. Keep
+// allocation footprints (not view widths) until the heap dies: even a
+// destroyed/replaced allocation leaves its span ambiguous for capture.
+namespace {
+struct GeometryHeapSpan {
+	UINT64 end, serial;
+};
+struct GeometryHeapHistory {
+	ID3D12Device *device;
+	UINT64 serial, size;
+	bool excluded = false;
+	std::map<UINT64, GeometryHeapSpan> spans;
+};
+const GUID geometry_heap_lifetime = { 0xb7670e64, 0x04ab, 0x4465, {0xa5,0x13,0xf6,0x3b,0x4f,0x0c,0x36,0x6f} };
+const GUID geometry_backing_heap_pin = { 0xb4ee534e, 0x81f4, 0x49da, {0xb1,0x46,0x93,0xa9,0xa4,0x66,0x7b,0x0c} };
+SRWLOCK geometry_heap_lock = SRWLOCK_INIT;
+std::unordered_map<IUnknown*, GeometryHeapHistory> geometry_heaps;
+UINT64 geometry_placement_serial;
+constexpr size_t geometry_heap_limit = 1024;
+constexpr size_t geometry_spans_per_heap = 4096;
+
+void geometry_heap_destroyed(void *key)
+{
+	AcquireSRWLockExclusive(&geometry_heap_lock);
+	geometry_heaps.erase(static_cast<IUnknown*>(key));
+	ReleaseSRWLockExclusive(&geometry_heap_lock);
+}
+
+void exclude_geometry_heap(GeometryHeapHistory &heap)
+{
+	heap.excluded = true;
+	heap.spans.clear();
+}
+}
+
+void Dx12GeometryRegisterHeap(ID3D12Device *device, void **output)
+{
+	Microsoft::WRL::ComPtr<ID3D12Heap> heap;
+	Microsoft::WRL::ComPtr<IUnknown> key;
+	if (!output || !*output || FAILED(static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&heap)))
+			|| FAILED(heap.As(&key)))
+		return;
+	const auto desc = heap->GetDesc();
+	if (desc.Properties.Type != D3D12_HEAP_TYPE_DEFAULT || !desc.SizeInBytes ||
+			(desc.Flags & ~(D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES | D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES)) ||
+			device->GetNodeCount() != 1)
+		return;
+	// The caller holds the created heap alive until registration is complete.
+	if (!Dx12NotifyDestruction(heap.Get(), geometry_heap_lifetime, geometry_heap_destroyed, key.Get()))
+		return;
+	AcquireSRWLockExclusive(&geometry_heap_lock);
+	if (geometry_heaps.size() < geometry_heap_limit)
+		geometry_heaps.emplace(key.Get(), GeometryHeapHistory{device, ++geometry_placement_serial, desc.SizeInBytes});
+	ReleaseSRWLockExclusive(&geometry_heap_lock);
+}
+
+Dx12GeometryPlacement Dx12GeometryRegisterPlacement(ID3D12Device *device, ID3D12Heap *heap,
+		UINT64 offset, const D3D12_RESOURCE_DESC *legacy_desc)
+{
+	Dx12GeometryPlacement placement = {};
+	placement.placed = true;
+	Microsoft::WRL::ComPtr<IUnknown> key;
+	if (!heap || FAILED(heap->QueryInterface(IID_PPV_ARGS(&key))))
+		return placement;
+
+	AcquireSRWLockShared(&geometry_heap_lock);
+	auto found = geometry_heaps.find(key.Get());
+	const bool tracked = found != geometry_heaps.end() && found->second.device == device && !found->second.excluded;
+	ReleaseSRWLockShared(&geometry_heap_lock);
+	if (!tracked)
+		return placement;
+
+	D3D12_RESOURCE_ALLOCATION_INFO allocation = {};
+	if (legacy_desc)
+		allocation = device->GetResourceAllocationInfo(0, 1, legacy_desc);
+
+	AcquireSRWLockExclusive(&geometry_heap_lock);
+	found = geometry_heaps.find(key.Get());
+	if (found != geometry_heaps.end() && found->second.device == device && !found->second.excluded) {
+		auto &history = found->second;
+		if (!allocation.Alignment || !allocation.SizeInBytes || allocation.SizeInBytes == UINT64_MAX ||
+				offset % allocation.Alignment || offset > history.size || allocation.SizeInBytes > history.size - offset ||
+				history.spans.size() >= geometry_spans_per_heap) {
+			exclude_geometry_heap(history);
+		} else {
+			UINT64 begin = offset, end = offset + allocation.SizeInBytes;
+			auto it = history.spans.lower_bound(begin);
+			if (it != history.spans.begin() && std::prev(it)->second.end > begin)
+				--it;
+			bool overlap = false;
+			while (it != history.spans.end() && it->first < end) {
+				overlap = true;
+				begin = min(begin, it->first);
+				end = max(end, it->second.end);
+				it = history.spans.erase(it);
+			}
+			const UINT64 serial = overlap ? 0 : ++geometry_placement_serial;
+			history.spans.emplace(begin, GeometryHeapSpan{end, serial});
+			placement = {key.Get(), history.serial, offset, allocation.SizeInBytes, serial, true};
+		}
+	}
+	ReleaseSRWLockExclusive(&geometry_heap_lock);
+	return placement;
+}
+
+void Dx12GeometryExcludeHeap(ID3D12Heap *heap)
+{
+	Microsoft::WRL::ComPtr<IUnknown> key;
+	if (!heap || FAILED(heap->QueryInterface(IID_PPV_ARGS(&key))))
+		return;
+	AcquireSRWLockExclusive(&geometry_heap_lock);
+	auto i = geometry_heaps.find(key.Get());
+	if (i != geometry_heaps.end())
+		exclude_geometry_heap(i->second);
+	ReleaseSRWLockExclusive(&geometry_heap_lock);
+}
+
+const char *Dx12GeometryPlacementStatus(const Dx12GeometryPlacement &placement)
+{
+	const char *status = "placed_heap_unproven";
+	if (!placement.heap)
+		return status;
+	AcquireSRWLockShared(&geometry_heap_lock);
+	auto i = geometry_heaps.find(placement.heap);
+	if (i != geometry_heaps.end() && i->second.serial == placement.heap_serial && !i->second.excluded) {
+		const auto &spans = i->second.spans;
+		auto span = spans.find(placement.offset);
+		status = "placed_alias_overlap";
+		if (placement.allocation_serial && span != spans.end() && span->second.serial == placement.allocation_serial)
+			status = nullptr;
+	}
+	ReleaseSRWLockShared(&geometry_heap_lock);
+	return status;
+}
+
 static volatile LONG64 resource_serial;
 
 // See Dx12TextureStamp. Counted up with the lock of the resource's shard held.
@@ -214,6 +351,14 @@ void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state, bool
 	info.desc = resource->GetDesc();
 	info.state = initial_state;
 	info.geometry_safe_committed = geometry_safe_committed;
+	// Capture can keep a resource alive until its staging fence, but a placed
+	// resource does not own its backing storage. Attach the heap to the
+	// eligible resource, without keeping the resource alive in our tracker.
+	if (geometry_origin.placement.allocation_serial &&
+			info.desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER &&
+			info.desc.Flags == D3D12_RESOURCE_FLAG_NONE &&
+			FAILED(resource->SetPrivateDataInterface(geometry_backing_heap_pin, geometry_origin.placement.heap)))
+		geometry_origin.placement.heap = nullptr;
 	info.geometry_origin = geometry_origin;
 	info.top_state = initial_state;
 	info.serial = InterlockedIncrement64(&resource_serial);

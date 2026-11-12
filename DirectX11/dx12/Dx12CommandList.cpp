@@ -154,6 +154,7 @@ HRESULT STDMETHODCALLTYPE Dx12GraphicsCommandList::Reset(ID3D12CommandAllocator 
 	Dx12ResetCmdState(&mState, pInitialState);
 	ForgetInfo();
 	mTransitions.clear();
+	mGeometryWildcardAlias = false;
 	mBufferWrites.clear();
 	if (!mPins.empty())
 		Dx12ShimPinsAbandoned(&mPins, mExecuted);
@@ -533,6 +534,8 @@ void STDMETHODCALLTYPE Dx12GraphicsCommandList::ResourceBarrier(UINT NumBarriers
 		// The second half of a split barrier is the one with the state
 		// the resource ends up in
 		if (pBarriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+			if (!pBarriers[i].Aliasing.pResourceBefore || !pBarriers[i].Aliasing.pResourceAfter)
+				mGeometryWildcardAlias = true;
 			Dx12ExcludeGeometryBarrierResource(pBarriers[i].Aliasing.pResourceBefore);
 			Dx12ExcludeGeometryBarrierResource(pBarriers[i].Aliasing.pResourceAfter);
 		}
