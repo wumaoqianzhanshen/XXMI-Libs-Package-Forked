@@ -199,7 +199,7 @@ static void resource_destroyed(void *object)
 	}
 }
 
-void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state, bool geometry_safe_committed)
+void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state, bool geometry_safe_committed, Dx12GeometryResourceOrigin geometry_origin)
 {
 	ID3D12Resource *resource = NULL;
 	D3D12_HEAP_PROPERTIES heap = {};
@@ -214,10 +214,13 @@ void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state, bool
 	info.desc = resource->GetDesc();
 	info.state = initial_state;
 	info.geometry_safe_committed = geometry_safe_committed;
+	info.geometry_origin = geometry_origin;
 	info.top_state = initial_state;
 	info.serial = InterlockedIncrement64(&resource_serial);
 	// Fails for reserved resources, which have no heap of their own
-	if (SUCCEEDED(resource->GetHeapProperties(&heap, NULL))) {
+	info.geometry_heap_query = resource->GetHeapProperties(&heap, &info.geometry_heap_flags);
+	if (SUCCEEDED(info.geometry_heap_query)) {
+		info.geometry_heap_properties = heap;
 		info.heap_type = heap.Type;
 		info.cpu_accessible = heap.Type == D3D12_HEAP_TYPE_UPLOAD
 			|| heap.Type == D3D12_HEAP_TYPE_READBACK

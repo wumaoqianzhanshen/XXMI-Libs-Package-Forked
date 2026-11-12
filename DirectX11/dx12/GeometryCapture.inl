@@ -12,7 +12,20 @@ struct GeometrySubmission {
 	UINT64 order = 0;
 	unsigned count = 0;
 };
+struct GeometryResourceDiagnostic {
+	Dx12GeometryResourceOrigin origin;
+	D3D12_HEAP_PROPERTIES heap = {};
+	D3D12_HEAP_FLAGS heap_flags = {};
+	D3D12_RESOURCE_FLAGS resource_flags = {};
+	HRESULT heap_query = E_FAIL;
+	UINT64 width = 0;
+	LONG recorded_state = DX12_STATE_UNKNOWN;
+	bool present = false;
+	bool committed_gate_passed = false;
+	bool cpu_visible = false;
+};
 struct GeometryView {
+	GeometryResourceDiagnostic diagnostic;
 	ID3D12Resource *resource = nullptr;
 	UINT64 serial = 0, offset = 0, version = 0, writer_order = 0;
 	ID3D12CommandQueue *writer = nullptr;
@@ -79,6 +92,9 @@ static void remember_geometry_view(GeometryDraw &draw, Dx12GraphicsCommandList *
 		v.status = "resource_range_out_of_bounds";
 	else {
 		v.serial = info.serial;
+		v.diagnostic = { info.geometry_origin, info.geometry_heap_properties,
+			info.geometry_heap_flags, info.desc.Flags, info.geometry_heap_query, info.desc.Width,
+			info.state, true, info.geometry_safe_committed, info.cpu_accessible };
 		if (info.geometry_barrier_unproven)
 			v.status = "excluded_barrier";
 		else if (!info.geometry_safe_committed || info.heap_type != D3D12_HEAP_TYPE_DEFAULT ||
@@ -311,6 +327,49 @@ static bool write_geometry_file(const wchar_t *path, const void *data, size_t by
 	return ok;
 }
 
+// An additive manifest field. It must not decide eligibility or enqueue work.
+static void print_geometry_resource_diagnostic(FILE *out, const GeometryResourceDiagnostic &d)
+{
+	fputs("\"resource_diagnostic\":", out);
+	if (!d.present) {
+		fputs("null,", out);
+		return;
+	}
+	fprintf(out, "{\"creation_api\":\"%s\",\"creation_protected_session\":%s,\"creation_heap_flags\":",
+		d.origin.creation_api ? d.origin.creation_api : "unknown",
+		d.origin.protected_session ? "true" : "false");
+	if (d.origin.requested_heap_flags == UINT_MAX)
+		fputs("null", out);
+	else
+		fprintf(out, "%u", d.origin.requested_heap_flags);
+	fprintf(out, ",\"heap_query_hr\":\"0x%08x\"", (UINT)d.heap_query);
+	if (SUCCEEDED(d.heap_query))
+		fprintf(out, ",\"heap_type\":%u,\"heap_flags\":%u,\"cpu_page_property\":%u,"
+			"\"memory_pool\":%u,\"creation_node_mask\":%u,\"visible_node_mask\":%u",
+			(UINT)d.heap.Type, (UINT)d.heap_flags, (UINT)d.heap.CPUPageProperty,
+			(UINT)d.heap.MemoryPoolPreference, d.heap.CreationNodeMask, d.heap.VisibleNodeMask);
+	else
+		fputs(",\"heap_type\":null,\"heap_flags\":null,\"cpu_page_property\":null,"
+			"\"memory_pool\":null,\"creation_node_mask\":null,\"visible_node_mask\":null", out);
+	fprintf(out, ",\"resource_flags\":%u,\"resource_width\":%llu,\"recorded_state\":%ld,"
+		"\"cpu_visible\":%s,\"committed_gate_passed\":%s,\"reasons\":[", (UINT)d.resource_flags,
+		d.width, d.recorded_state, d.cpu_visible ? "true" : "false",
+		d.committed_gate_passed ? "true" : "false");
+	const char *sep = "";
+	auto reason = [&](bool fail, const char *name) {
+		if (fail) {
+			fprintf(out, "%s\"%s\"", sep, name);
+			sep = ",";
+		}
+	};
+	reason(!d.committed_gate_passed, "committed_gate");
+	reason(FAILED(d.heap_query), "heap_properties_unknown");
+	reason(SUCCEEDED(d.heap_query) && d.heap.Type != D3D12_HEAP_TYPE_DEFAULT, "non_default_heap");
+	reason(d.cpu_visible, "cpu_visible");
+	reason(d.resource_flags != D3D12_RESOURCE_FLAG_NONE, "resource_flags");
+	fputs("]},", out);
+}
+
 static void finish_geometry()
 {
 	if (!geometry_accepting.load(std::memory_order_acquire))
@@ -440,6 +499,7 @@ static void finish_geometry()
 					"\"draw_order\":%llu,\"writer_order\":%llu,\"queue_proof\":\"%s\",\"record_status\":\"%s\",",
 					sub.queue.Get(), dx12_shim->queue, v.writer, sub.order, v.writer_order,
 					v.queue_proof ? v.queue_proof : "none", v.record_status ? v.record_status : "eligible");
+				print_geometry_resource_diagnostic(out, v.diagnostic);
 				if (!status && c)
 					fprintf(out, "\"file\":\"geometry/%ls\",", c->name);
 				else

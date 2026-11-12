@@ -18,6 +18,14 @@
 
 const LONG DX12_STATE_UNKNOWN = -1;
 
+// F8 diagnostics only: preserve the creation entry point and its inputs
+// separately from what GetHeapProperties reports about the resource.
+struct Dx12GeometryResourceOrigin {
+	const char *creation_api = nullptr;
+	UINT requested_heap_flags = UINT_MAX;
+	bool protected_session = false;
+};
+
 struct Dx12ResourceInfo {
 	D3D12_RESOURCE_DESC desc;
 	D3D12_HEAP_TYPE heap_type;
@@ -25,6 +33,10 @@ struct Dx12ResourceInfo {
 	bool cpu_accessible;
 	bool geometry_safe_committed;
 	bool geometry_barrier_unproven;
+	Dx12GeometryResourceOrigin geometry_origin;
+	D3D12_HEAP_PROPERTIES geometry_heap_properties;
+	D3D12_HEAP_FLAGS geometry_heap_flags;
+	HRESULT geometry_heap_query;
 	// Buffers only
 	UINT64 va;
 
@@ -78,7 +90,7 @@ bool Dx12IsGone(const void *object);
 
 // For the device's Create*Resource methods, on success. ppvResource is what
 // the game asked for, which may be nothing at all.
-void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state, bool geometry_safe_committed = false);
+void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state, bool geometry_safe_committed = false, Dx12GeometryResourceOrigin geometry_origin = {});
 
 bool Dx12GetResourceInfo(ID3D12Resource *resource, Dx12ResourceInfo *info);
 void Dx12ExcludeGeometryBarrierResource(ID3D12Resource *resource);
