@@ -479,7 +479,7 @@ HRESULT STDMETHODCALLTYPE Dx12Device::CreateCommittedResource(const D3D12_HEAP_P
 	HRESULT hr = mOrig->CreateCommittedResource(pHeapProperties, HeapFlags, pDesc, InitialResourceState, pOptimizedClearValue, riidResource, ppvResource);
 
 	if (SUCCEEDED(hr))
-		Dx12TrackResource(riidResource, ppvResource, InitialResourceState);
+		Dx12TrackResource(riidResource, ppvResource, InitialResourceState, (HeapFlags & (D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER | D3D12_HEAP_FLAG_HARDWARE_PROTECTED)) == 0);
 	return hr;
 }
 
@@ -488,7 +488,7 @@ HRESULT STDMETHODCALLTYPE Dx12Device::CreateCommittedResource1(const D3D12_HEAP_
 	HRESULT hr = mOrig->CreateCommittedResource1(pHeapProperties, HeapFlags, pDesc, InitialResourceState, pOptimizedClearValue, pProtectedSession, riidResource, ppvResource);
 
 	if (SUCCEEDED(hr))
-		Dx12TrackResource(riidResource, ppvResource, InitialResourceState);
+		Dx12TrackResource(riidResource, ppvResource, InitialResourceState, !pProtectedSession && (HeapFlags & (D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER | D3D12_HEAP_FLAG_HARDWARE_PROTECTED)) == 0);
 	return hr;
 }
 
@@ -497,7 +497,7 @@ HRESULT STDMETHODCALLTYPE Dx12Device::CreateCommittedResource2(const D3D12_HEAP_
 	HRESULT hr = mOrig->CreateCommittedResource2(pHeapProperties, HeapFlags, pDesc, InitialResourceState, pOptimizedClearValue, pProtectedSession, riidResource, ppvResource);
 
 	if (SUCCEEDED(hr))
-		Dx12TrackResource(riidResource, ppvResource, InitialResourceState);
+		Dx12TrackResource(riidResource, ppvResource, InitialResourceState, !pProtectedSession && (HeapFlags & (D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER | D3D12_HEAP_FLAG_HARDWARE_PROTECTED)) == 0);
 	return hr;
 }
 

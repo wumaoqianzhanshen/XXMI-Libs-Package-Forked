@@ -29,3 +29,15 @@ void Dx12FrameDumpFramePresented();
 
 // Keep a newly requested capture armed across a few Presents with no recorded draw.
 void Dx12FrameDumpAdvanceCaptureWindow();
+
+// Submission hook only: no bridge/queue work while taking this gate.
+class Dx12GeometrySubmissionLock {
+	bool held, exclusive;
+public:
+	explicit Dx12GeometrySubmissionLock(bool lock, bool exclusive = false);
+	~Dx12GeometrySubmissionLock();
+	Dx12GeometrySubmissionLock(const Dx12GeometrySubmissionLock&) = delete;
+	Dx12GeometrySubmissionLock& operator=(const Dx12GeometrySubmissionLock&) = delete;
+};
+bool Dx12FrameGeometryAccepting();
+void Dx12FrameGeometryExecuted(Dx12GraphicsCommandList *list, ID3D12CommandQueue *queue);

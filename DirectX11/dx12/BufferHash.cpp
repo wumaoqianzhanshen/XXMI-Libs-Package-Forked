@@ -528,6 +528,28 @@ bool Dx12FindBufferHash(ID3D12Resource *resource, UINT64 offset, Dx12BufferHash 
 	return found;
 }
 
+// For the bounded geometry capture, a known upload must cover the exact
+// bound view and have been submitted on the capture queue. A hash alone
+// would also accept a copy that was only recorded or later overwritten.
+bool Dx12BufferGeometryVersion(ID3D12Resource *resource, UINT64 offset, UINT64 bytes,
+		ID3D12CommandQueue *queue, UINT64 *version, UINT32 *crc)
+{
+	bool ok = false;
+	AcquireSRWLockShared(&lock);
+	auto i = ranges.find(resource);
+	if (i != ranges.end()) {
+		auto v = i->second.find(offset);
+		if (v != i->second.end() && v->second.valid && v->second.bytes == bytes &&
+				v->second.queue == queue && v->second.order && !v->second.unmapped) {
+			*version = v->second.version;
+			*crc = v->second.data_hash;
+			ok = true;
+		}
+	}
+	ReleaseSRWLockShared(&lock);
+	return ok;
+}
+
 bool Dx12ListWroteBuffer(const Dx12ListBufferWrites *writes, ID3D12Resource *resource, UINT64 offset, UINT64 bytes)
 {
 	if (!writes || writes->recorded.empty())

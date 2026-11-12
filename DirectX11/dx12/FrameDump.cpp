@@ -146,6 +146,8 @@ static void dump_textures(Dx12GraphicsCommandList *list, const Dx12PipelineInfo 
 	}
 }
 
+#include "GeometryCapture.inl"
+
 void Dx12FrameDumpDraw(Dx12GraphicsCommandList *list, const Dx12PipelineInfo *pipeline, bool indexed, UINT count,
 		UINT instances, UINT start, INT base_vertex, UINT start_instance)
 {
@@ -178,6 +180,7 @@ void Dx12FrameDumpDraw(Dx12GraphicsCommandList *list, const Dx12PipelineInfo *pi
 
 	for (stage = 0; stage < DX12_STAGE_CS; stage++)
 		dump_textures(list, pipeline, (Dx12ShaderStage)stage, suffix);
+	remember_geometry(list, pipeline, indexed, count, instances, start, base_vertex, start_instance, draw_number);
 }
 
 // What a copy of one plane of a depth stencil texture comes as
@@ -464,6 +467,7 @@ void Dx12FrameDumpFramePresented()
 		texture.resource->Release();
 	textures.clear();
 	texture_index.clear();
+	finish_geometry();
 
 	if (log_file)
 		fclose(log_file);

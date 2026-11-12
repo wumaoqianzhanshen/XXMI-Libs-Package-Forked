@@ -35,6 +35,7 @@ public:
 	// Counts the times the list was reset, to tell one recording of it
 	// from the next
 	UINT mResets;
+	UINT64 mFrameGeometryId = 0; // Capture ticket for this recording only.
 
 	Dx12CmdState mState;
 

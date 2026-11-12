@@ -150,6 +150,7 @@ HRESULT STDMETHODCALLTYPE Dx12GraphicsCommandList::Reset(ID3D12CommandAllocator 
 {
 	mDraws = mDispatches = mFastDraws = 0;
 	mResets++;
+	mFrameGeometryId = 0;
 	Dx12ResetCmdState(&mState, pInitialState);
 	ForgetInfo();
 	mTransitions.clear();
@@ -531,9 +532,16 @@ void STDMETHODCALLTYPE Dx12GraphicsCommandList::ResourceBarrier(UINT NumBarriers
 	for (i = 0; pBarriers && i < NumBarriers; i++) {
 		// The second half of a split barrier is the one with the state
 		// the resource ends up in
-		if (pBarriers[i].Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION
-		    || (pBarriers[i].Flags & D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY))
+		if (pBarriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+			Dx12ExcludeGeometryBarrierResource(pBarriers[i].Aliasing.pResourceBefore);
+			Dx12ExcludeGeometryBarrierResource(pBarriers[i].Aliasing.pResourceAfter);
+		}
+		if (pBarriers[i].Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
 			continue;
+		if (pBarriers[i].Flags & D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY) {
+			Dx12ExcludeGeometryBarrierResource(pBarriers[i].Transition.pResource);
+			continue;
+		}
 
 		mTransitions.push_back({ pBarriers[i].Transition.pResource, pBarriers[i].Transition.Subresource,
 			(LONG)pBarriers[i].Transition.StateAfter });
@@ -555,6 +563,7 @@ void STDMETHODCALLTYPE Dx12GraphicsCommandList::Barrier(UINT32 NumBarrierGroups,
 				mTransitions.push_back({ group->pTextureBarriers[j].pResource,
 					D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, DX12_STATE_UNKNOWN });
 			} else if (group->Type == D3D12_BARRIER_TYPE_BUFFER) {
+				Dx12ExcludeGeometryBarrierResource(group->pBufferBarriers[j].pResource);
 				mTransitions.push_back({ group->pBufferBarriers[j].pResource,
 					D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, DX12_STATE_UNKNOWN });
 			}

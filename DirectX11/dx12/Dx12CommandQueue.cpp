@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Bridge.h"
+#include "FrameDump.h"
 #include "Dx12CommandList.h"
 #include "Dx12Device.h"
 #include "ResourceTracker.h"
@@ -197,26 +198,37 @@ void STDMETHODCALLTYPE Dx12CommandQueue::ExecuteCommandLists(UINT NumCommandList
 	if (!pins.empty())
 		Dx12ShimResidencyWait(mOrig);
 
-	if (buffer_writes) {
-		Dx12QueueLock(mOrig);
-		order = Dx12QueueExecutes(mOrig);
-		for (i = 0; i < NumCommandLists; i++) {
-			if (lists[i] == ppCommandLists[i])
-				continue;
-			Dx12GraphicsCommandList *proxy = static_cast<Dx12GraphicsCommandList*>(ppCommandLists[i]);
-			if (!proxy->mBufferWrites.empty())
-				Dx12BufferWritesExecuted(&proxy->mBufferWrites, mOrig, order);
-		}
-	}
-
-	if (start.QuadPart)
-		Profiling::Spike::add(Profiling::Spike::DX12_EXECUTE, start.QuadPart, L"before", 0);
 	{
-		Profiling::Spike::Scope spike(Profiling::Spike::DX12_EXECUTE_DRIVER, L"lists", NumCommandLists);
-		mOrig->ExecuteCommandLists(NumCommandLists, lists);
+		// Shared outside the narrow capture-copy interval; ordinary submits
+		// on separate queues remain parallel. No bridge work inside this gate.
+		Dx12GeometrySubmissionLock capture_lock(true);
+		const bool geometry = Dx12FrameGeometryAccepting();
+		if (buffer_writes) {
+			Dx12QueueLock(mOrig);
+			order = Dx12QueueExecutes(mOrig);
+			for (i = 0; i < NumCommandLists; i++) {
+				if (lists[i] == ppCommandLists[i])
+					continue;
+				Dx12GraphicsCommandList *proxy = static_cast<Dx12GraphicsCommandList*>(ppCommandLists[i]);
+				if (!proxy->mBufferWrites.empty())
+					Dx12BufferWritesExecuted(&proxy->mBufferWrites, mOrig, order);
+			}
+		}
+
+		if (start.QuadPart)
+			Profiling::Spike::add(Profiling::Spike::DX12_EXECUTE, start.QuadPart, L"before", 0);
+		{
+			Profiling::Spike::Scope spike(Profiling::Spike::DX12_EXECUTE_DRIVER, L"lists", NumCommandLists);
+			mOrig->ExecuteCommandLists(NumCommandLists, lists);
+		}
+		if (buffer_writes)
+			Dx12QueueUnlock(mOrig);
+
+		if (geometry)
+			for (i = 0; i < NumCommandLists; i++)
+				Dx12FrameGeometryExecuted(lists[i] == ppCommandLists[i] ? nullptr :
+					static_cast<Dx12GraphicsCommandList*>(ppCommandLists[i]), mOrig);
 	}
-	if (buffer_writes)
-		Dx12QueueUnlock(mOrig);
 
 	if (!pins.empty()) {
 		Profiling::Spike::Scope spike(Profiling::Spike::DX12_EXECUTE, L"after");

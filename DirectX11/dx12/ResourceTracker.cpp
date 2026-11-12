@@ -199,7 +199,7 @@ static void resource_destroyed(void *object)
 	}
 }
 
-void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state)
+void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state, bool geometry_safe_committed)
 {
 	ID3D12Resource *resource = NULL;
 	D3D12_HEAP_PROPERTIES heap = {};
@@ -213,6 +213,7 @@ void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state)
 
 	info.desc = resource->GetDesc();
 	info.state = initial_state;
+	info.geometry_safe_committed = geometry_safe_committed;
 	info.top_state = initial_state;
 	info.serial = InterlockedIncrement64(&resource_serial);
 	// Fails for reserved resources, which have no heap of their own
@@ -247,6 +248,21 @@ void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state)
 	Dx12NotifyDestruction(resource, resource_destroyed);
 
 	resource->Release();
+}
+
+// A legacy split transition may still be pending and the texture tracker
+// deliberately records only its ending half. Keep this capture stricter,
+// without changing the state used by the existing texture and Mod paths.
+void Dx12ExcludeGeometryBarrierResource(ID3D12Resource *resource)
+{
+	if (!resource)
+		return;
+	ResourceShard *shard = shard_of(resource);
+	AcquireSRWLockExclusive(&shard->lock);
+	auto i = shard->resources.find(resource);
+	if (i != shard->resources.end() && i->second.desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+		i->second.geometry_barrier_unproven = true;
+	ReleaseSRWLockExclusive(&shard->lock);
 }
 
 bool Dx12GetResourceInfo(ID3D12Resource *resource, Dx12ResourceInfo *info)

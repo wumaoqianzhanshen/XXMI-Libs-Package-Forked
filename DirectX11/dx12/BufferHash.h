@@ -99,6 +99,8 @@ void Dx12CopyBuffer(Dx12ListBufferWrites *writes, ID3D12Resource *dst, ID3D12Res
 void Dx12BufferWritesExecuted(Dx12ListBufferWrites *writes, ID3D12CommandQueue *queue, UINT64 order);
 
 bool Dx12FindBufferHash(ID3D12Resource *resource, UINT64 offset, Dx12BufferHash *hash);
+bool Dx12BufferGeometryVersion(ID3D12Resource *resource, UINT64 offset, UINT64 bytes,
+		ID3D12CommandQueue *queue, UINT64 *version, UINT32 *crc);
 // The same for a draw recorded to a list with these writes, or NULL. *own is
 // set if the list's copies decided it, which then holds for the list alone.
 bool Dx12FindListBufferHash(const Dx12ListBufferWrites *writes, ID3D12Resource *resource, UINT64 offset, Dx12BufferHash *hash, bool *own);

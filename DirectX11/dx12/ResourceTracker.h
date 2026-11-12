@@ -23,6 +23,8 @@ struct Dx12ResourceInfo {
 	D3D12_HEAP_TYPE heap_type;
 	// Whether Map can be expected to work
 	bool cpu_accessible;
+	bool geometry_safe_committed;
+	bool geometry_barrier_unproven;
 	// Buffers only
 	UINT64 va;
 
@@ -76,9 +78,10 @@ bool Dx12IsGone(const void *object);
 
 // For the device's Create*Resource methods, on success. ppvResource is what
 // the game asked for, which may be nothing at all.
-void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state);
+void Dx12TrackResource(REFIID riid, void **ppvResource, LONG initial_state, bool geometry_safe_committed = false);
 
 bool Dx12GetResourceInfo(ID3D12Resource *resource, Dx12ResourceInfo *info);
+void Dx12ExcludeGeometryBarrierResource(ID3D12Resource *resource);
 
 // Lists of ours read resources of the game (copies from its buffers) that the
 // game's own lists may not use until later, and an engine that manages
